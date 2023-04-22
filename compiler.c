@@ -48,8 +48,9 @@ struct s_parameter {
 	int inch;
 	int noret;
 	int meta;
-	int jpix, jpiy, exhlde, jpmode;
-	char *absolute;
+	int metasize;
+	int jpix, jpiy, exhlde,jpmode;
+	int animate;
 
 	int *idx1;
 	int nidx1,midx1;
@@ -151,9 +152,10 @@ void diff_printf(char **output, int *lenoutput,...)
 
 
 struct s_compilation_action {
-	unsigned char sp1[256];
-	unsigned char sp2[256];
+	unsigned char *sp1;
+	unsigned char *sp2;
 	int idx,idx2;
+	int lng;
 };
 
 struct s_compilation_thread {
@@ -213,7 +215,7 @@ void *MakeDiffThread(void *param)
 	struct s_compilation_thread *ct;
 	ct=(struct s_compilation_thread *)param;
 	for (i=0;i<ct->nbaction;i++) {
-		for (j=0;j<256;j++) {
+		for (j=0;j<ct->action[i].lng;j++) {
 			ct->action[i].sp1[j]&=0xF;
 			ct->action[i].sp2[j]&=0xF;
 		}
@@ -221,7 +223,7 @@ void *MakeDiffThread(void *param)
 			if (ct->action[i].idx==ct->action[i].idx2) diff_printf(&ct->output,&ct->lenoutput,"%s%d:\n",ct->parameter->label,ct->action[i].idx);
 				else diff_printf(&ct->output,&ct->lenoutput,"%s%d_%d:\n",ct->parameter->label,ct->action[i].idx,ct->action[i].idx2);
 		}
-		MakeDiff(&ct->output, &ct->lenoutput,ct->parameter,ct->action[i].sp1,ct->action[i].sp2,256);
+		MakeDiff(&ct->output, &ct->lenoutput,ct->parameter,ct->action[i].sp1,ct->action[i].sp2,ct->action[i].lng);
 	}
 	pthread_exit(NULL);
 	return NULL;
@@ -685,6 +687,10 @@ void MakeDiff(char **output, int *lenoutput, struct s_parameter *parameter, unsi
 	if (parameter->exhlde) diff_printf(output,lenoutput,"ex hl,de ; using this you must call the routine with sprite data MSB in D register\n");
 	else diff_printf(output,lenoutput,"; this routine must be called with sprite data MSB in H register (from #40 to #4F)\n");
 
+	if (parameter->animate) {
+		diff_printf(output,lenoutput,".routine{cpt} ld h,HSPADR\n");
+	}
+
 	for (i=0;i<longueur_flux;i++) {
 		/* traitement des metasprites */
 		if ((i&0xFF)==0 && i!=0) {
@@ -733,6 +739,10 @@ void MakeDiff(char **output, int *lenoutput, struct s_parameter *parameter, unsi
 	if (parameter->jpiy) diff_printf(output,lenoutput,"jp (iy)\n");
 	if (parameter->jpmode) diff_printf(output,lenoutput,"jp %s\n",parameter->absolute);
 	diff_printf(output,lenoutput,"\n");
+
+	if (parameter->animate) {
+		diff_printf(output,lenoutput,"cpt+=1\n");
+	}
 }
 
 int FileExists(char *filename) {
@@ -766,7 +776,8 @@ void Compiler(struct s_parameter *parameter)
 	int lenoutput=0;
 	char *output=NULL;
 
-	if (parameter->meta) {
+	// compilation de meta sprite en mode simple
+	if (parameter->meta && !parameter->metasize) {
 		int len;
 
 		fs=fopen(parameter->filename1,"rb");
@@ -791,6 +802,11 @@ void Compiler(struct s_parameter *parameter)
 		if (len) printf("%.*s",len,output+idx);
 		return;
 	} else {
+		int spritesize=256;
+
+		if (parameter->meta && parameter->metasize) spritesize=parameter->metasize*256;
+fprintf(stderr,"; spritesize=%d\n",spritesize);
+
 		if (parameter->nidx1) {
 			if (!parameter->nidx2) {
 				/* compile full sur un seul fichier */
@@ -803,36 +819,45 @@ void Compiler(struct s_parameter *parameter)
 
 				for (j=0;j<parameter->nidx1;j++) {
 					/* copie du sprite courant depuis l'index idx1[j] */
-					
-					memcpy(compilation_action.sp2,data1+parameter->idx1[j]*256,256);
-					for (i=0;i<256;i++) {
-						compilation_action.sp1[i]=compilation_action.sp2[i]+8;
+				
+					compilation_action.sp1=malloc(spritesize);
+					compilation_action.sp2=malloc(spritesize);
+					compilation_action.lng=spritesize;
+
+					memcpy(compilation_action.sp2,data1+parameter->idx1[j]*256,spritesize);
+					for (i=0;i<spritesize;i++) {
+						compilation_action.sp1[i]=compilation_action.sp2[i]+8; // force differences!
 					}
 					compilation_action.idx=compilation_action.idx2=parameter->idx1[j];
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				}
 			} else {
 				/* compile diff sur deux fichiers avec deux séquences! */
+fprintf(stderr,"; compilation MT sur 2 sequences avec support META\n");
 				if (parameter->nidx1!=parameter->nidx2) {
-					fprintf(stderr,"pour compiler en diff deux séquences il faut deux séquences avec le même nombre d'indexes\n");
+					fprintf(stderr,"pour compiler en diff deux séquences il faut deux séquences avec le même nombre d'indexes (%d != %d)\n",parameter->nidx1,parameter->nidx2);
 					exit(-2);
 				}
 				for (i=zemax=0;i<parameter->nidx1;i++) {
 					if (parameter->idx1[i]>zemax) zemax=parameter->idx1[i];
 				}
-				data1=malloc((zemax+1)*256);
-				FileReadBinary(parameter->filename1,data1,256*(zemax+1));
+				data1=malloc((zemax+1)*spritesize);
+				FileReadBinary(parameter->filename1,data1,spritesize*(zemax+1));
 				for (i=zemax=0;i<parameter->nidx2;i++) {
 					if (parameter->idx2[i]>zemax) zemax=parameter->idx2[i];
 				}
-				data2=malloc((zemax+1)*256);
-				FileReadBinary(parameter->filename2,data2,256*(zemax+1));
+				data2=malloc((zemax+1)*spritesize);
+				FileReadBinary(parameter->filename2,data2,spritesize*(zemax+1));
 
 				for (j=0;j<parameter->nidx1;j++) {
-					memcpy(compilation_action.sp1,data1+parameter->idx1[j]*256,256);
-					memcpy(compilation_action.sp2,data2+parameter->idx2[j]*256,256);
+					compilation_action.sp1=malloc(spritesize);
+					compilation_action.sp2=malloc(spritesize);
+
+					memcpy(compilation_action.sp1,data1+parameter->idx1[j]*spritesize,spritesize);
+					memcpy(compilation_action.sp2,data2+parameter->idx2[j]*spritesize,spritesize);
 					compilation_action.idx=parameter->idx1[j];
 					compilation_action.idx2=parameter->idx2[j];
+					compilation_action.lng=spritesize;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				}
 			}
@@ -867,6 +892,7 @@ void Compiler(struct s_parameter *parameter)
 						ok=0;
 					}
 					if (parameter->compilediff) printf("; DIFF from %s to %s\n",filename1,filename2); else printf("; FULL from %s\n",filename1);
+					/*  Le label c'est bon UNIQUEMENT en cas de compilation unique... */
 					if (parameter->label) {
 						printf("%s%d:\n",parameter->label,idx);
 					}
@@ -875,18 +901,25 @@ void Compiler(struct s_parameter *parameter)
 					ok=0;
 				}
 				if (parameter->compilediff) {
-					FileReadBinary(filename1,compilation_action.sp1,256);
-					FileReadBinary(filename2,compilation_action.sp2,256);
+					compilation_action.sp1=malloc(spritesize);
+					compilation_action.sp2=malloc(spritesize);
+
+					FileReadBinary(filename1,compilation_action.sp1,spritesize);
+					FileReadBinary(filename2,compilation_action.sp2,spritesize);
 					compilation_action.idx=idx-1;
 					compilation_action.idx2=idx;
+					compilation_action.lng=spritesize;
 
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				} else if (parameter->compilefull) {
 					compilation_action.idx2=compilation_action.idx=idx-1;
+					compilation_action.sp1=malloc(spritesize);
+					compilation_action.sp2=malloc(spritesize);
+					compilation_action.lng=spritesize;
 					
-					FileReadBinary(filename1,compilation_action.sp2,256);
-					for (i=0;i<256;i++) {
-						compilation_action.sp1[i]=compilation_action.sp2[i]+8;
+					FileReadBinary(filename1,compilation_action.sp2,spritesize);
+					for (i=0;i<spritesize;i++) {
+						compilation_action.sp1[i]=compilation_action.sp2[i]+8; // force differences!
 					}
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				}
@@ -912,7 +945,7 @@ void Compiler(struct s_parameter *parameter)
 		}
 	}
 				
-				
+	// pas de liberation memoire, mode gros porc...
 }
 
 /***************************************
@@ -928,7 +961,7 @@ void Usage()
 	#undef FUNC
 	#define FUNC "Usage"
 	
-	printf("%.*s.exe v1.4 / Edouard BERGE 2022-04\n",(int)(sizeof(__FILENAME__)-3),__FILENAME__);
+	printf("%.*s.exe v1.5 / Edouard BERGE 2023-04\n",(int)(sizeof(__FILENAME__)-3),__FILENAME__);
 	printf("\n");
 	printf("syntaxe is: %.*s file1 [file2] [options]\n",(int)(sizeof(__FILENAME__)-3),__FILENAME__);
 	printf("\n");
@@ -940,17 +973,18 @@ void Usage()
 	printf("      like 0-4  \n");
 	printf("     you may mix indexes\n");
 	printf("      like 1-63,0 ; from 1 to 63 then 0\n");
-	printf("           \n");
-	printf("-c         compile a full sprite\n");
-	printf("-d         compile difference between two sprites or a sequence\n");
-	printf("-meta      compile consecutive sprites\n");
-	printf("-noret     do not add RET at the end of the routine\n");
-	printf("-exhlde    add a EX HL,DE at the beginning of the routine\n");
-	printf("-inch      add a INC H at the end of the routine\n");
-	printf("-jpix      add a JP (IX) at the end of the routine\n");
-	printf("-jpiy      add a JP (IY) at the end of the routine\n");
-	printf("-jp <nn>   add a JP <label or value> at the end of the routine\n");
-	printf("-l <label> insert a numbered label for multi diff\n");
+	printf("\n");
+	printf("-c                  compile a full sprite\n");
+	printf("-d                  compile difference between two sprites or a sequence\n");
+	printf("-meta <auto|nb>     compile consecutive sprites\n");
+	printf("-noret              do not add RET at the end of the routine\n");
+	printf("-exhlde             add a EX HL,DE at the beginning of the routine\n");
+	printf("-inch               add a INC H at the end of the routine\n");
+	printf("-jpix               add a JP (IX) at the end of the routine\n");
+	printf("-jpiy               add a JP (IY) at the end of the routine\n");
+	printf("-jp <nn>            add a JP <label or address> at the end of the routine\n");
+	printf("-l <label>          insert a numbered label for multi diff\n");
+	printf("-alist              create a full ready-to-use list for animation core\n");
 	printf("\n");
 	
 	exit(-1);
@@ -985,7 +1019,11 @@ void GetSequence(struct s_parameter *parameter, char *sequence)
 				}
 		}
 //printf("vs=%d ve=%d\n",valstar,valend);
-		for (j=valstar;j<=valend;j++) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
+		if (valend<valstar) {
+			for (j=valstar;j>=valend;j--) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
+		} else {
+			for (j=valstar;j<=valend;j++) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
+		}
 	}
 
 //for (i=0;i<nidx;i++) printf("%d ",idx[i]);
@@ -1023,21 +1061,28 @@ int ParseOptions(char **argv,int argc, struct s_parameter *parameter)
 		if (i+1<argc) {
 			GetSequence(parameter,argv[++i]);
 		} else Usage();
+	} else if (strcmp(argv[i],"-alist")==0) {
+		parameter->animate=1;
 	} else if (strcmp(argv[i],"-meta")==0) {
 		parameter->meta=1;
+		if (i+1<argc) {
+			i++;
+			parameter->metasize=atoi(argv[i]); // auto=0
+		} else {
+			fprintf(stderr,"; META option needs AUTO or a positive non null value\n");
+			exit(-1);
+		}
+	} else if (strcmp(argv[i],"-noret")==0) {
+		parameter->noret=1;
+	} else if (strcmp(argv[i],"-jpix")==0) {
+		parameter->jpix=1;
+	} else if (strcmp(argv[i],"-jpiy")==0) {
+		parameter->jpiy=1;
 	} else if (strcmp(argv[i],"-jp")==0) {
 		parameter->jpmode=1;
 		if (i+1<argc) {
 			parameter->absolute=argv[++i];
 		} else Usage();
-	} else if (strcmp(argv[i],"-noret")==0) {
-		parameter->noret=1;
-	} else if (strcmp(argv[i],"-exhlde")==0) {
-		parameter->exhlde=1;
-	} else if (strcmp(argv[i],"-jpix")==0) {
-		parameter->jpix=1;
-	} else if (strcmp(argv[i],"-jpiy")==0) {
-		parameter->jpiy=1;
 	} else if (argv[i][0]=='-') {
 		switch(argv[i][1])
 		{
