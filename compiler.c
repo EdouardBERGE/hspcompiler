@@ -48,9 +48,8 @@ struct s_parameter {
 	int inch;
 	int noret;
 	int meta;
-	int metasize;
-	int jpix, jpiy, exhlde,jpmode;
-	int animate;
+	int jpix, jpiy, exhlde, jpmode;
+	char *absolute;
 
 	int *idx1;
 	int nidx1,midx1;
@@ -155,7 +154,7 @@ struct s_compilation_action {
 	unsigned char *sp1;
 	unsigned char *sp2;
 	int idx,idx2;
-	int lng;
+	int wrklen;
 };
 
 struct s_compilation_thread {
@@ -215,7 +214,7 @@ void *MakeDiffThread(void *param)
 	struct s_compilation_thread *ct;
 	ct=(struct s_compilation_thread *)param;
 	for (i=0;i<ct->nbaction;i++) {
-		for (j=0;j<ct->action[i].lng;j++) {
+		for (j=0;j<ct->action[i].wrklen;j++) {
 			ct->action[i].sp1[j]&=0xF;
 			ct->action[i].sp2[j]&=0xF;
 		}
@@ -223,7 +222,7 @@ void *MakeDiffThread(void *param)
 			if (ct->action[i].idx==ct->action[i].idx2) diff_printf(&ct->output,&ct->lenoutput,"%s%d:\n",ct->parameter->label,ct->action[i].idx);
 				else diff_printf(&ct->output,&ct->lenoutput,"%s%d_%d:\n",ct->parameter->label,ct->action[i].idx,ct->action[i].idx2);
 		}
-		MakeDiff(&ct->output, &ct->lenoutput,ct->parameter,ct->action[i].sp1,ct->action[i].sp2,ct->action[i].lng);
+		MakeDiff(&ct->output, &ct->lenoutput,ct->parameter,ct->action[i].sp1,ct->action[i].sp2,ct->action[i].wrklen);
 	}
 	pthread_exit(NULL);
 	return NULL;
@@ -276,15 +275,17 @@ void __FileReadBinary(char *filename, char *data, int len, int curline)
 }
 #define FileReadBinary(fichier,data,len) __FileReadBinary(fichier,data,len,__LINE__)
 
+#define NBREG 5
+
 char *GetValStr(char *txtbuffer, int *current_reg,int v) {
         #undef FUNC
         #define FUNC "GetValStr"
 
-	static char *txtreg[5]={"a","b","c","d","e"};
+	static char *txtreg[NBREG]={"b","c","d","e","a"};
 	int i;
 
-	for (i=0;i<5;i++) {
-		if (v==current_reg[i]) {
+	for (i=0;i<NBREG;i++) {
+		if (v==current_reg[i] && current_reg[i]!=-1) {
 			sprintf(txtbuffer,"%s",txtreg[i]);
 			return txtbuffer;
 		}
@@ -292,6 +293,8 @@ char *GetValStr(char *txtbuffer, int *current_reg,int v) {
 	sprintf(txtbuffer,"#%X",v);
 	return txtbuffer;
 }
+
+/*
 struct s_sprval {
 	int val;
 	int cpt;
@@ -307,257 +310,228 @@ int compare_sprval(const void *a, const void *b)
 	struct s_sprval *sa,*sb;
 	sa=(struct s_sprval *)a;
 	sb=(struct s_sprval *)b;
-	/* du plus grand au plus petit */
+	// du plus grand au plus petit
 	return sb->cpt-sa->cpt;
 }
-int *ComputeDiffStats(char **output, int *lenoutput,unsigned char *sp1, unsigned char *sp2, int start, int first, int *current_reg, int longueur_flux)
+*/
+
+// optimizer v2
+struct s_cell {
+        struct s_cell *prev,*next;
+        int val;
+        int cpt;
+};
+
+struct s_flux {
+        int val;
+        int cpt;
+};
+int compare_fluxcount(const void *a, const void *b)
 {
-	#undef FUNC
-	#define FUNC "ComputeDiffState"
+        struct s_flux *sa,*sb;
+        sa=(struct s_flux *)a;
+        sb=(struct s_flux *)b;
+        /* du plus grand au plus petit */
+        return sb->cpt-sa->cpt;
+}
 
-	static char *txtreg[5]={"a","b","c","d","e"};
 
-	static int valregA=-1,valregB=-1,valregC=-1,valregD=-1,valregE=-1;
-	struct s_regupdate regupdate[5];
-	struct s_sprval switchspr;
-	struct s_sprval diff[16];
-	struct s_sprval shortdiff[16];
-	int old_reg[5];
-	int newreg[5];
-	int ireg=0;
-	int i,j,k,l;
+void register_update(char **output, int *lenoutput, char **reg,unsigned char *flux, int start, int rmax, int *cval) {
+	int rvalue,ovalue;
+	if (strcmp(reg[rmax],"a")==0 && !flux[start]) { // optimisation propre à A
+		diff_printf(output,lenoutput,"\n/* stat update */ xor a ; idx=%d\n",start);
+	} else {
+		rvalue=flux[start];
+		ovalue=cval[rmax];
 
-	int kk,change=0;
-
-#define STAT_INFO 0
-
-	/******************************************************
-	      i n i t i a l i s e    s t a t s
-	******************************************************/
-	if (first) {
-                // reset
-                valregA=valregB=valregC=valregD=valregE=-1;
+		if (((rvalue+1)&0xFF)==ovalue) diff_printf(output,lenoutput,"\n/* stat update */ dec %s ; idx=%d\n",reg[rmax],start); else
+		if (((rvalue-1)&0xFF)==ovalue) diff_printf(output,lenoutput,"\n/* stat update */ inc %s ; idx=%d\n",reg[rmax],start); else
+						diff_printf(output,lenoutput,"\n/* stat update */ ld %s,#%02X ; idx=%d\n",reg[rmax],flux[start],start);
 	}
-	/* backup reg */
-	for (i=0;i<5;i++) old_reg[i]=current_reg[i];
-	
-	/* get and sort values */
-	for (i=0;i<16;i++) {
-		diff[i].val=i;
-		diff[i].cpt=0;
-		diff[i].prv=0;
-	}
-	for (i=start;i<longueur_flux;i++) {
-		if (sp1[i]!=sp2[i] && sp2[i]!=(i&0xF)) diff[sp2[i]].cpt++;
-	}
-	/* where are the previous values in the stats? */
-	for (i=0;i<5;i++) {
-		for (j=0;j<16;j++) {
-			if (diff[j].val==old_reg[i]) {
-				diff[j].prv=1;
-				break;
-			}
-		}
-	}
-	qsort(diff,16,sizeof(struct s_sprval),compare_sprval);
+	cval[rmax]=flux[start];
+}
 
-#if STAT_INFO
-	printf("**** before optim - start=%d\n",start);
-	for (i=0;i<16;i++) {
-		if (!diff[i].cpt) break;
-		printf("diff[%d] val=%d cpt=%d prv=%d\n",i,diff[i].val,diff[i].cpt,diff[i].prv);
-	}
-#endif
-	/******************************************************
-	      r e o p t i m i s e    s t a t s
-	******************************************************/
-	/* especially at the beginning of the sprite we need to look forward for a better optimisation*/
+int *ComputeDiffStats(char **output, int *lenoutput,unsigned char *flux, int start, int size, int *cval) {
+        struct s_flux fcount[256];
+        struct s_flux fbefor[256];
+        int i,j,k,l,mreg;
+        char *reg[]={"b","c","d","e","a"};
 
-/* pas besoin de chercher une autre optim si il y a peu de couleurs au total!!!! @@TODO */
+int dibiji=0;
 
-	if (diff[4].cpt>3) {
-#if STAT_INFO		
-		printf("-> try optimisation\n");
-#endif
-		/* can we change a secondary color before the use of a major color? */
-		for (j=0;j<5;j++) {
-			for (i=start;i<longueur_flux;i++) {
-				if (sp1[i]!=sp2[i] && sp2[i]!=(i&0xF) && sp2[i]==diff[j].val) {
-					break;
-				}
-			}
-			/* do stats for changes until the marker i */
-			for (l=0;l<16;l++) {
-				shortdiff[l].val=diff[l].val;
-				shortdiff[l].cpt=0;
-				shortdiff[l].prv=diff[l].prv;
-			}
-			/* stats for secondary colors only */
-			for (l=start;l<i;l++) {
-				for (k=5;k<16;k++) {
-					if (sp1[l]!=sp2[l] && sp2[l]!=(l&0xF) && sp2[l]==shortdiff[k].val) shortdiff[k].cpt++;
-				}
-			}
-			qsort(shortdiff,16,sizeof(struct s_sprval),compare_sprval);
-#if STAT_INFO
-			printf("stats de %d a %d pour la couleur %d\n",start,i,diff[j].val);
-			for (l=0;l<5;l++) {
-				if (!shortdiff[l].cpt) break;
-				printf("shortdiff[%d] val=%d cpt=%d\n",l,shortdiff[l].val,shortdiff[l].cpt);
-			}
-#endif
-#if 0
-			/***** code deprecated by v1.3 */
-			/* apply optimisation if possible */
-			if (shortdiff[0].prv && shortdiff[0].cpt) {
-				/* toujours reprendre les surcharges commencées */
-				for (k=0;diff[k].val!=shortdiff[0].val;k++);
-				switchspr=diff[j];
-				diff[j]=diff[k];
-				diff[k]=switchspr;
-#endif
-			/* is it an outsider? v1.3 */
-			if (shortdiff[0].prv) {
-				int treshold;
+        if (!start) {
+                for (i=0;i<NBREG;i++) {
+                        cval[i]=-1;
+                }
+        }
+        // count bytes
+        for (i=0;i<256;i++) {
+                fcount[i].val=i;
+                fcount[i].cpt=0;
+                fbefor[i].val=i;
+                fbefor[i].cpt=0;
+        }
+        for (i=start;i<size;i++) {
+                fcount[flux[i]].cpt++;
+        }
+        qsort(fcount,256,sizeof(struct s_flux),compare_fluxcount);
 
-				/* si on peut optimiser un registre alors le treshold est plus faible */
-				if (((shortdiff[0].val+1)&15)==diff[j].val || ((shortdiff[0].val-1)&15)==diff[j].val) treshold=2; else treshold=4;
-				/* on conditionne le takeover à la valeur qui arrive de suite! */
-				if (shortdiff[0].cpt>=treshold && (shortdiff[0].val==sp2[start] || !start)) {
-                                        /* takeover on bigger count */
-					for (k=0;diff[k].val!=shortdiff[0].val;k++);
-					switchspr=diff[j];
-					diff[j]=diff[k];
-					diff[k]=switchspr;
-				}
+        // first init avec les premières données à dépasser le seuil
+        if (!start) {
+                for (i=mreg=0;i<size;i++) {
+                        fbefor[flux[i]].cpt++;
+                        if (fbefor[flux[i]].cpt>4) {
+                                // init!
+                                cval[mreg++]=flux[i];
+                                fbefor[flux[i]].cpt=-size-1; // annuler les prochains tests
+                                if (mreg==NBREG) break;
+                        }
+                }
+                // reinit for 2nd pass
+                for (i=0;i<256;i++) {
+                        if (fbefor[i].cpt>=0) fbefor[i].cpt=0; // mais pas les valeurs déjà validées
+                        else fbefor[i].cpt-=size; // on en remet un petit coup!
+                }
+                for (i=0;i<size;i++) {
+                        fbefor[flux[i]].cpt++;
+                        if (fbefor[flux[i]].cpt>2) {
+                                // init!
+                                cval[mreg++]=flux[i];
+                                fbefor[flux[i]].cpt=-size; // annuler les prochains tests
+                                if (mreg==NBREG) break;
+                        }
+                }
+		// automatic pack
+                i=0;
+                while (i+1<NBREG) {
+                        if (cval[i]>=0 && cval[i+1]>=0) {
+                                diff_printf(output,lenoutput,"ld %s%s,#%02X%02X\n",reg[i],reg[i+1],cval[i],cval[i+1]);
+                        } else if (cval[i]>=0) {
+                                diff_printf(output,lenoutput,"ld %s,#%02X\n",reg[i],cval[i]);
+                        }
+                        i+=2;
+                }
+                if (i<NBREG) {
+                        if (cval[i]>=0) diff_printf(output,lenoutput,"ld %s,#%02X\n",reg[i],cval[i]);
+                }
+        } else {
+                int inplace,imax,rmax,tresh,ireplace;
 
-#if STAT_INFO
-printf("surcharge possible de val=%d cpt=%d\n",shortdiff[0].val,shortdiff[0].cpt);
-printf("couleur à surcharger %d par %d\n",diff[j].val,diff[k].val);
-#endif
-#if 0
-			/***** code deprecated by v1.3 */
-			} else if (shortdiff[0].cpt<5) {
-				/* si on n'a rien au dessus de 5 inutile de continuer */
-				break;
-#endif
-			} else {
-				/* confirm choice by switching values */
-				for (k=0;diff[k].val!=shortdiff[0].val;k++);
-				switchspr=diff[j];
-				diff[j]=diff[k];
-				diff[k]=switchspr;
-#if STAT_INFO
-printf("surcharge possible de val=%d cpt=%d\n",shortdiff[0].val,shortdiff[0].cpt);
-printf("couleur à surcharger %d par %d\n",diff[j].val,diff[k].val);
-#endif
-			}
-		}
-	}
+                // tester si la valeur courante est en cache
+                for (i=inplace=0;i<NBREG && cval[i]!=-1;i++) {
+                        if (flux[start]==cval[i]) {
+                                inplace=1;
+                                break;
+                        }
+                }
 
-#if STAT_INFO
-printf("**** after optim\n");
-	for (i=0;i<16;i++) {
-		if (!diff[i].cpt) break;
-		printf("diff[%d] val=%d cpt=%d prv=%d\n",i,diff[i].val,diff[i].cpt,diff[i].prv);
-	}
-#endif
+                /* on va, pour toutes les valeurs >4 qui ne sont pas déjà en cache,
+                 * regarder si on peut se substituer à un des caches existants
+                 */
 
-	/******************************************************
-	      i n i t i a l i s e r
-	******************************************************/
-	if (first) {
-		for (i=0;i<5;i++) {
-			//printf("diff[%d].cpt=%d val=%d\n",i,diff[i].cpt,diff[i].val);
-			if (diff[i].cpt<3) {
-				current_reg[i]=diff[i].val=-1;
-			} else {
-				current_reg[i]=diff[i].val;
-			}
-		}
-		if (diff[0].val==0) {
-			diff_printf(output,lenoutput,"xor a\n");
-			valregA=diff[0].val;
-		} else if (diff[0].val>0) {
-			diff_printf(output,lenoutput,"ld a,%d\n",diff[0].val);
-			valregA=diff[0].val;
-		}
-		if (diff[1].val>=0 && diff[2].val>=0) diff_printf(output,lenoutput,"ld bc,#%X\n",diff[1].val*256+diff[2].val); else
-		{
-			if (diff[1].val>=0) diff_printf(output,lenoutput,"ld b,%d\n",diff[1].val); else
-			if (diff[2].val>=0) diff_printf(output,lenoutput,"ld c,%d\n",diff[2].val);
-                        valregB=diff[1].val;
-                        valregC=diff[2].val;
-		}
-		if (diff[3].val>=0 && diff[4].val>=0) diff_printf(output,lenoutput,"ld de,#%X\n",diff[3].val*256+diff[4].val); else
-		{
-			if (diff[3].val>=0) diff_printf(output,lenoutput,"ld d,%d\n",diff[3].val);
-			if (diff[4].val>=0) diff_printf(output,lenoutput,"ld e,%d\n",diff[4].val);
-                        valregD=diff[3].val;
-                        valregE=diff[4].val;
-		}
-		//diff_printf(output,lenoutput,"\n");
-		
-		/* améliorer l'init en cas de seulement deux registres... A+B -> BC */
-		
-		return current_reg;
-	}
-	/******************************************************
-	      b u f f e r e d    u p d a t e r
-	******************************************************/
-	/* same values as previous set? */
-	for (i=0;i<5;i++) {
-		/* new top value not found in previous set */
-		if (!diff[i].prv) {
-			/* override a prv with stat-3 */
-#if 0
-			for (j=15;j>4;j--) {
-				/* look from the end of stats */
-				if (diff[j].prv && diff[i].cpt-3>diff[j].cpt) {
-#else
-			/***********************************************/
-			/********** patch 1.3 **************************/
-			/***********************************************/
-			for (j=15;j>=0;j--) {
-				/* look from the end of stats v1.3 */
-				if (diff[j].prv && diff[i].cpt-3>diff[j].cpt && (diff[i].val==sp2[start] || !start)) {
-#endif
-					/* need to know which register will be replaced */
-					for (k=0;k<5;k++) {
-						if (current_reg[k]==diff[j].val) break;
+                // si elle n'est pas en cache alors on va voir si on peut changer un registre, celui qui est le plus loin de la position courante
+                if (!inplace) {
+                        // retrouver la valeur courante dans le tri
+                        for (i=0;i<256;i++) {
+                                if (fcount[i].val==flux[start]) break;
+                        }
+                        ireplace=i;
+
+                        // en fonction de la quantité on change le seuil (car on pourrait avoir besoin de rebasculer sur une autre valeur et ça a un coût)
+                        switch (fcount[NBREG-1].cpt) {
+                                case 0:tresh=2;break;
+                                case 1:tresh=3;break;
+                                default:tresh=4;break;
+                        }
+
+                        // est-ce que la valeur dont on a besoin a intérêt à être remplacée? est-ce qu'on dépasse notre seuil?
+                        if (fcount[ireplace].cpt>tresh) {
+                                if (dibiji) printf("valeur #%02X on dépasse notre seuil %d>%d\n",fcount[ireplace].val,fcount[ireplace].cpt,tresh);
+
+                                // on cherche parmi les valeurs en cache celle qui est le plus loin possible de la courante pour augmenter nos chances de remplacement
+                                for (j=imax=0;j<NBREG;j++) {
+                                        for (i=start;i<size;i++) {
+                                                if (flux[i]!=cval[j]) {
+						       	if (i>imax) {
+	                                                        imax=i;
+        	                                                rmax=j;
+							}
+                                                } else break;
+                                        }
+                                }
+                                if (dibiji) printf(" rmax=%d candidate register=%s imax=%d\n",rmax,reg[rmax],imax);
+
+                                // ensuite on va analyser la distribution dans le flux au plus proche pour voir si c'est possible de remplacer
+                                for (i=start;i<size;i++) {
+                                        fbefor[flux[i]].cpt++;
+
+                                        // tant que la valeur à remplacer ne dépasse pas le seuil
+                                        if (fbefor[cval[rmax]].cpt<tresh+1) {
+                                                // si la valeur en cache dépasse ou égalise la plus balaise avant le seuil, alors on n'en tient pas compte
+                                                if (fbefor[cval[rmax]].cpt>=fbefor[flux[start]].cpt) {
+                                                        if (dibiji) printf(" valeur en cache > nouvelle candidate avant le seuil\n");
+                                                        break;
+                                                }
+                                        } else {
+						// on a un premier feu vert pour remplacer la valeur par la nouvelle MAIS
+						// est-ce qu'il n'existerait pas d'autres valeurs +intéressantes sur l'intervale?
+						// qui ne soient pas en cache...
+						for (l=0;l<256;l++) {
+							if (l==flux[start]) continue;
+							if (fbefor[l].cpt>fbefor[flux[start]].cpt) {
+								// on a un meilleur candidat sur l'intervale!
+								for (j=0;j<NBREG;j++) {
+									if (cval[j]==l) break;
+								}
+								// et il n'est pas en cache!
+								if (j==NBREG) {
+									if (dibiji) printf("pas de remplacement car on a mieux sur la période!\n");
+									break;
+								}
+							}
+						}
+						if (l==256) {
+							if (dibiji) printf("stat update because #%02X tresh at %d\n",fbefor[cval[rmax]].val,i);
+        	                                        // la nouvelle valeur dépasse le seuil d'occurences
+        		                        	register_update(output,lenoutput,reg,flux,start,rmax,cval);
+						}
+						// else break dans tous les cas!
+                                                break;
+                                        }
+                                }
+				if (i==size) {
+	                                if (dibiji) printf("analyse de flux n'a pas rencontré assez de valeurs à remplacer,c'est qu'on peut écraser! (ou pas!)\n");
+					for (l=0;l<256;l++) {
+						if (l==flux[start]) continue;
+						if (fbefor[l].cpt>fbefor[flux[start]].cpt) {
+							// on a un meilleur candidat sur l'intervale!
+							for (j=0;j<NBREG;j++) {
+								if (cval[j]==l) break;
+							}
+							// et il n'est pas en cache!
+							if (j==NBREG) {
+								if (dibiji) printf("pas de remplacement car on a mieux sur la période!\n");
+								break;
+							}
+						}
 					}
-					if (k==5) {
-						fprintf(stderr,"bug dans la reaffectation des registres\n");
-						exit(-1);
+					if (l==256) {
+						if (dibiji) printf("validé sur la période on remplace\n");
+        		                        register_update(output,lenoutput,reg,flux,start,rmax,cval);
 					}
-
-					/* register change is buffered */
-					regupdate[ireg].reg=k;
-					regupdate[ireg].val=diff[i].val;
-					regupdate[ireg].oldval=diff[j].val;
-					ireg++;
-					/* confirm register change */
-					current_reg[k]=diff[i].val;
-					diff[j].prv=0;
-					diff[i].prv=1;
-					break;
 				}
-			}
-		}
-	}
-	/******************************************************
-	      u p d a t e
-	******************************************************/
-	if (ireg) {
-		int ia=-1,ib=-1,ic=-1,id=-1,ie=-1;
+                        } else {
+                                if (dibiji) printf("valeur courante pas en cache et pas intéressante (x%d)\n",fcount[ireplace].cpt);
+                        }
+                }
+        }
 
-		diff_printf(output,lenoutput,"; stats update\n");
-//fprintf(stderr,"update\n");		
-		/* get A,B,C,D,E indexes */
-		for (i=0;i<ireg;i++) {
-			switch (regupdate[i].reg) {
-				case 0:
-					/* optimised A v1.4 */
+        return cval;
+}
+
+
+
+					/* optimised A v1.4 
 					ia=i;
 					if (!regupdate[ia].val) {
 						diff_printf(output,lenoutput,"xor a\n");
@@ -608,69 +582,7 @@ printf("**** after optim\n");
 					}
 					valregA=regupdate[ia].val;
 					break;
-				case 1:ib=i;break;
-				case 2:ic=i;break;
-				case 3:id=i;break;
-				case 4:ie=i;break;
-				default:diff_printf(output,lenoutput,"register error in update\n");exit(-1);
-			}
-		}
-		/* try to pack BC */
-		if (ib>=0 && ic>=0) {
-			int packed=1;
-			if ((regupdate[ib].val==(regupdate[ib].oldval-1)&0xF) || (regupdate[ib].val==(regupdate[ib].oldval+1)&0xF)) {
-				if ((regupdate[ic].val==(regupdate[ic].oldval-1)&0xF) || (regupdate[ic].val==(regupdate[ic].oldval+1)&0xF)) {
-					/* do not pack BC for thoses values 1.2 */
-					if (regupdate[ib].val==(regupdate[ib].oldval-1)&0xF) diff_printf(output,lenoutput,"dec b :"); else diff_printf(output,lenoutput,"inc b :");
-					if (regupdate[ic].val==(regupdate[ic].oldval-1)&0xF) diff_printf(output,lenoutput,"dec c\n"); else diff_printf(output,lenoutput,"inc c\n");
-					packed=0;
-				}
-			}
-			if (packed) diff_printf(output,lenoutput,"ld bc,#%X\n",regupdate[ib].val*256+regupdate[ic].val);
-			valregB=regupdate[ib].val;
-                        valregC=regupdate[ic].val;
-		} else {
-			if (ib>=0) {
-				if (regupdate[ib].val==(regupdate[ib].oldval-1)&0xF) diff_printf(output,lenoutput,"dec b\n"); else
-				if (regupdate[ib].val==(regupdate[ib].oldval+1)&0xF) diff_printf(output,lenoutput,"inc b\n"); else diff_printf(output,lenoutput,"ld b,%d\n",regupdate[ib].val);
-				valregB=regupdate[ib].val;
-			}
-			if (ic>=0) {
-				if (regupdate[ic].val==(regupdate[ic].oldval-1)&0xF) diff_printf(output,lenoutput,"dec c\n"); else
-				if (regupdate[ic].val==(regupdate[ic].oldval+1)&0xF) diff_printf(output,lenoutput,"inc c\n"); else diff_printf(output,lenoutput,"ld c,%d\n",regupdate[ic].val);
-                        	valregC=regupdate[ic].val;
-			}
-		}
-		/* try to pack DE */
-		if (id>=0 && ie>=0) {
-			/* (fixed v1.2) */
-			int packed=1;
-			if ((regupdate[id].val==(regupdate[id].oldval-1)&0xF) || (regupdate[id].val==(regupdate[id].oldval+1)&0xF)) {
-				if ((regupdate[ie].val==(regupdate[ie].oldval-1)&0xF) || (regupdate[ie].val==(regupdate[ie].oldval+1)&0xF)) {
-					/* do not pack DE for thoses values 1.2 */
-					if (regupdate[id].val==(regupdate[id].oldval-1)&0xF) diff_printf(output,lenoutput,"dec d :"); else diff_printf(output,lenoutput,"inc d :");
-					if (regupdate[ie].val==(regupdate[ie].oldval-1)&0xF) diff_printf(output,lenoutput,"dec e\n"); else diff_printf(output,lenoutput,"inc e\n");
-					packed=0;
-				}
-			}
-			if (packed) diff_printf(output,lenoutput,"ld de,#%X\n",regupdate[id].val*256+regupdate[ie].val);
-                        valregD=regupdate[id].val;
-                        valregE=regupdate[ie].val;
-		} else {
-			if (id>=0) {
-				if (regupdate[id].val==(regupdate[id].oldval-1)&0xF) diff_printf(output,lenoutput,"dec d\n"); else
-				if (regupdate[id].val==(regupdate[id].oldval+1)&0xF) diff_printf(output,lenoutput,"inc d\n"); else diff_printf(output,lenoutput,"ld d,%d\n",regupdate[id].val);
-	                        valregD=regupdate[id].val;
-			}
-			if (ie>=0) {
-				if (regupdate[ie].val==(regupdate[ie].oldval-1)&0xF) diff_printf(output,lenoutput,"dec e\n"); else
-				if (regupdate[ie].val==(regupdate[ie].oldval+1)&0xF) diff_printf(output,lenoutput,"inc e\n"); else diff_printf(output,lenoutput,"ld e,%d\n",regupdate[ie].val);
-                        	valregE=regupdate[ie].val;
-			}
-		}
-	}
-	return current_reg;
-}
+					*/
 
 
 
@@ -683,27 +595,32 @@ void MakeDiff(char **output, int *lenoutput, struct s_parameter *parameter, unsi
 	int previous_l_value=500;
 	char txtbuffer[32];
 	int current_reg[5]={-1,-1,-1,-1,-1};
+	int fluxlen=0,iflux=0;
+
+	unsigned char *flux=NULL;
+	flux=malloc(longueur_flux);
+	for (i=0;i<longueur_flux;i++) if (sp1[i]!=sp2[i]) flux[fluxlen++]=sp2[i];
 
 	if (parameter->exhlde) diff_printf(output,lenoutput,"ex hl,de ; using this you must call the routine with sprite data MSB in D register\n");
 	else diff_printf(output,lenoutput,"; this routine must be called with sprite data MSB in H register (from #40 to #4F)\n");
-
-	if (parameter->animate) {
-		diff_printf(output,lenoutput,".routine{cpt} ld h,HSPADR\n");
-	}
 
 	for (i=0;i<longueur_flux;i++) {
 		/* traitement des metasprites */
 		if ((i&0xFF)==0 && i!=0) {
 			diff_printf(output,lenoutput,"inc h ; next sprite inside meta\n");
+	diff_printf(output,lenoutput,"; b=%d c=%d d=%d e=%d a=%d\n",current_reg[0],current_reg[1],current_reg[2],current_reg[3],current_reg[4]);
 		}
 
-		ComputeDiffStats(output,lenoutput,sp1,sp2,i,i==0?1:0,current_reg,longueur_flux);
+		//ComputeDiffStats(output,lenoutput,sp1,sp2,i,i==0?1:0,current_reg,fluxlen);
+
 		if (sp1[i]!=sp2[i]) {
+			ComputeDiffStats(output,lenoutput,flux,iflux,fluxlen,current_reg); iflux++;
 			if (first) {
 				/* first value may be after the first sprite! */
 				diff_printf(output,lenoutput,"ld l,%s\n",GetValStr(txtbuffer,current_reg,i&0xFF));
-				if (sp2[i]==i&0xF) diff_printf(output,lenoutput,"ld (hl),l\n");
-				else {
+				if (sp2[i]==i&0xF) {
+					diff_printf(output,lenoutput,"ld (hl),l\n");
+				} else {
 					char shortval[32];
 					strcpy(shortval,GetValStr(txtbuffer,current_reg,sp2[i]));
 					if (shortval[0]!='#') {
@@ -722,11 +639,11 @@ void MakeDiff(char **output, int *lenoutput, struct s_parameter *parameter, unsi
 				/* optimised offset change */
 	//printf("offset=%x sp2[i]=%x offset&0xF=%x\n",i,sp2[i],i&0xF);
 				if (previous_l_value==i-1) diff_printf(output,lenoutput,"inc l : "); else
-				if ((i&0xFF)==current_reg[0]) diff_printf(output,lenoutput,"ld l,a : "); else
-				if ((i&0xFF)==current_reg[1]) diff_printf(output,lenoutput,"ld l,b : "); else
-				if ((i&0xFF)==current_reg[2]) diff_printf(output,lenoutput,"ld l,c : "); else
-				if ((i&0xFF)==current_reg[3]) diff_printf(output,lenoutput,"ld l,d : "); else
-				if ((i&0xFF)==current_reg[4]) diff_printf(output,lenoutput,"ld l,e : "); else diff_printf(output,lenoutput,"ld l,%d : ",i&0xFF);
+				if ((i&0xFF)==current_reg[0] && current_reg[0]>=0) diff_printf(output,lenoutput,"ld l,b : "); else
+				if ((i&0xFF)==current_reg[1] && current_reg[1]>=0) diff_printf(output,lenoutput,"ld l,c : "); else
+				if ((i&0xFF)==current_reg[2] && current_reg[2]>=0) diff_printf(output,lenoutput,"ld l,d : "); else
+				if ((i&0xFF)==current_reg[3] && current_reg[3]>=0) diff_printf(output,lenoutput,"ld l,e : "); else
+				if ((i&0xFF)==current_reg[4] && current_reg[4]>=0) diff_printf(output,lenoutput,"ld l,a : "); else diff_printf(output,lenoutput,"ld l,%d : ",i&0xFF);
 				/* optimised value set (fixed v1.2) */
 				if (sp2[i]==(i&0xF)) diff_printf(output,lenoutput,"ld (hl),l\n"); else diff_printf(output,lenoutput,"ld (hl),%s\n",GetValStr(txtbuffer,current_reg,sp2[i]));
 				previous_l_value=i;
@@ -739,10 +656,6 @@ void MakeDiff(char **output, int *lenoutput, struct s_parameter *parameter, unsi
 	if (parameter->jpiy) diff_printf(output,lenoutput,"jp (iy)\n");
 	if (parameter->jpmode) diff_printf(output,lenoutput,"jp %s\n",parameter->absolute);
 	diff_printf(output,lenoutput,"\n");
-
-	if (parameter->animate) {
-		diff_printf(output,lenoutput,"cpt+=1\n");
-	}
 }
 
 int FileExists(char *filename) {
@@ -776,9 +689,10 @@ void Compiler(struct s_parameter *parameter)
 	int lenoutput=0;
 	char *output=NULL;
 
-	// compilation de meta sprite en mode simple
-	if (parameter->meta && !parameter->metasize) {
+	if (0 && parameter->meta) {
 		int len;
+
+		// legacy but loud => will be better to change scripts => PERFORMANCES PHOQUE YEAH !!!
 
 		fs=fopen(parameter->filename1,"rb");
 		fseek(fs,0,SEEK_END);
@@ -802,62 +716,54 @@ void Compiler(struct s_parameter *parameter)
 		if (len) printf("%.*s",len,output+idx);
 		return;
 	} else {
-		int spritesize=256;
-
-		if (parameter->meta && parameter->metasize) spritesize=parameter->metasize*256;
-fprintf(stderr,"; spritesize=%d\n",spritesize);
-
 		if (parameter->nidx1) {
 			if (!parameter->nidx2) {
 				/* compile full sur un seul fichier */
 				for (i=zemax=0;i<parameter->nidx1;i++) {
 					if (parameter->idx1[i]>zemax) zemax=parameter->idx1[i];
 				}
-				/* on a l'index max, alors on peut calculer la taille max à lire */
-				data1=malloc((zemax+1)*256);
-				FileReadBinary(parameter->filename1,data1,256*(zemax+1));
+				/* on a l'index max, alors on peut calculer la taille max à lire => handling meta sprites */
+				data1=malloc((zemax+1)*256*parameter->meta);
+				FileReadBinary(parameter->filename1,data1,parameter->meta*256*(zemax+1));
 
 				for (j=0;j<parameter->nidx1;j++) {
 					/* copie du sprite courant depuis l'index idx1[j] */
 				
-					compilation_action.sp1=malloc(spritesize);
-					compilation_action.sp2=malloc(spritesize);
-					compilation_action.lng=spritesize;
-
-					memcpy(compilation_action.sp2,data1+parameter->idx1[j]*256,spritesize);
-					for (i=0;i<spritesize;i++) {
-						compilation_action.sp1[i]=compilation_action.sp2[i]+8; // force differences!
+					compilation_action.sp1=malloc(256*parameter->meta);
+					compilation_action.sp2=malloc(256*parameter->meta);
+					memcpy(compilation_action.sp2,data1+parameter->idx1[j]*256*parameter->meta,256*parameter->meta);
+					for (i=0;i<256*parameter->meta;i++) {
+						compilation_action.sp1[i]=compilation_action.sp2[i]+8;
 					}
 					compilation_action.idx=compilation_action.idx2=parameter->idx1[j];
+					compilation_action.wrklen=256*parameter->meta;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				}
 			} else {
 				/* compile diff sur deux fichiers avec deux séquences! */
-fprintf(stderr,"; compilation MT sur 2 sequences avec support META\n");
 				if (parameter->nidx1!=parameter->nidx2) {
-					fprintf(stderr,"pour compiler en diff deux séquences il faut deux séquences avec le même nombre d'indexes (%d != %d)\n",parameter->nidx1,parameter->nidx2);
+					fprintf(stderr,"pour compiler en diff deux séquences il faut deux séquences avec le même nombre d'indexes\n");
 					exit(-2);
 				}
 				for (i=zemax=0;i<parameter->nidx1;i++) {
 					if (parameter->idx1[i]>zemax) zemax=parameter->idx1[i];
 				}
-				data1=malloc((zemax+1)*spritesize);
-				FileReadBinary(parameter->filename1,data1,spritesize*(zemax+1));
+				data1=malloc((zemax+1)*256*parameter->meta);
+				FileReadBinary(parameter->filename1,data1,256*(zemax+1)*parameter->meta);
 				for (i=zemax=0;i<parameter->nidx2;i++) {
 					if (parameter->idx2[i]>zemax) zemax=parameter->idx2[i];
 				}
-				data2=malloc((zemax+1)*spritesize);
-				FileReadBinary(parameter->filename2,data2,spritesize*(zemax+1));
+				data2=malloc((zemax+1)*256*parameter->meta);
+				FileReadBinary(parameter->filename2,data2,256*(zemax+1)*parameter->meta);
 
 				for (j=0;j<parameter->nidx1;j++) {
-					compilation_action.sp1=malloc(spritesize);
-					compilation_action.sp2=malloc(spritesize);
-
-					memcpy(compilation_action.sp1,data1+parameter->idx1[j]*spritesize,spritesize);
-					memcpy(compilation_action.sp2,data2+parameter->idx2[j]*spritesize,spritesize);
+					compilation_action.sp1=malloc(256*parameter->meta);
+					compilation_action.sp2=malloc(256*parameter->meta);
+					memcpy(compilation_action.sp1,data1+parameter->idx1[j]*256*parameter->meta,256*parameter->meta);
+					memcpy(compilation_action.sp2,data2+parameter->idx2[j]*256*parameter->meta,256*parameter->meta);
 					compilation_action.idx=parameter->idx1[j];
 					compilation_action.idx2=parameter->idx2[j];
-					compilation_action.lng=spritesize;
+					compilation_action.wrklen=256*parameter->meta;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				}
 			}
@@ -892,7 +798,6 @@ fprintf(stderr,"; compilation MT sur 2 sequences avec support META\n");
 						ok=0;
 					}
 					if (parameter->compilediff) printf("; DIFF from %s to %s\n",filename1,filename2); else printf("; FULL from %s\n",filename1);
-					/*  Le label c'est bon UNIQUEMENT en cas de compilation unique... */
 					if (parameter->label) {
 						printf("%s%d:\n",parameter->label,idx);
 					}
@@ -901,26 +806,25 @@ fprintf(stderr,"; compilation MT sur 2 sequences avec support META\n");
 					ok=0;
 				}
 				if (parameter->compilediff) {
-					compilation_action.sp1=malloc(spritesize);
-					compilation_action.sp2=malloc(spritesize);
-
-					FileReadBinary(filename1,compilation_action.sp1,spritesize);
-					FileReadBinary(filename2,compilation_action.sp2,spritesize);
+					compilation_action.sp1=malloc(256);
+					compilation_action.sp2=malloc(256);
+					FileReadBinary(filename1,compilation_action.sp1,256);
+					FileReadBinary(filename2,compilation_action.sp2,256);
 					compilation_action.idx=idx-1;
 					compilation_action.idx2=idx;
-					compilation_action.lng=spritesize;
+					compilation_action.wrklen=256;
 
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				} else if (parameter->compilefull) {
+					compilation_action.sp1=malloc(256);
+					compilation_action.sp2=malloc(256);
 					compilation_action.idx2=compilation_action.idx=idx-1;
-					compilation_action.sp1=malloc(spritesize);
-					compilation_action.sp2=malloc(spritesize);
-					compilation_action.lng=spritesize;
 					
-					FileReadBinary(filename1,compilation_action.sp2,spritesize);
-					for (i=0;i<spritesize;i++) {
-						compilation_action.sp1[i]=compilation_action.sp2[i]+8; // force differences!
+					FileReadBinary(filename1,compilation_action.sp2,256);
+					for (i=0;i<256;i++) {
+						compilation_action.sp1[i]=compilation_action.sp2[i]+8;
 					}
+					compilation_action.wrklen=256;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
 				}
 			}
@@ -945,7 +849,7 @@ fprintf(stderr,"; compilation MT sur 2 sequences avec support META\n");
 		}
 	}
 				
-	// pas de liberation memoire, mode gros porc...
+				
 }
 
 /***************************************
@@ -961,7 +865,7 @@ void Usage()
 	#undef FUNC
 	#define FUNC "Usage"
 	
-	printf("%.*s.exe v1.5 / Edouard BERGE 2023-04\n",(int)(sizeof(__FILENAME__)-3),__FILENAME__);
+	printf("%.*s.exe v2.0 / Edouard BERGE 2024-10\n",(int)(sizeof(__FILENAME__)-3),__FILENAME__);
 	printf("\n");
 	printf("syntaxe is: %.*s file1 [file2] [options]\n",(int)(sizeof(__FILENAME__)-3),__FILENAME__);
 	printf("\n");
@@ -974,17 +878,20 @@ void Usage()
 	printf("     you may mix indexes\n");
 	printf("      like 1-63,0 ; from 1 to 63 then 0\n");
 	printf("\n");
-	printf("-c                  compile a full sprite\n");
-	printf("-d                  compile difference between two sprites or a sequence\n");
-	printf("-meta <auto|nb>     compile consecutive sprites\n");
-	printf("-noret              do not add RET at the end of the routine\n");
-	printf("-exhlde             add a EX HL,DE at the beginning of the routine\n");
-	printf("-inch               add a INC H at the end of the routine\n");
-	printf("-jpix               add a JP (IX) at the end of the routine\n");
-	printf("-jpiy               add a JP (IY) at the end of the routine\n");
-	printf("-jp <nn>            add a JP <label or address> at the end of the routine\n");
-	printf("-l <label>          insert a numbered label for multi diff\n");
-	printf("-alist              create a full ready-to-use list for animation core\n");
+	printf("\n");
+	printf("file processing\n");
+	printf("-c         compile a full sprite\n");
+	printf("-d         compile difference between two sprites or a sequence\n");
+	printf("-meta      compile consecutive sprites\n");
+	printf("\n");
+	printf("code generation:\n");
+	printf("-exhlde    add a EX HL,DE          at the beginning of the routine\n");
+	printf("-l <label> insert a numbered label at the beginning (for multi diff)\n");
+	printf("-inch      add a INC H    at the end of the routine\n");
+	printf("-noret     do not add RET at the end of the routine\n");
+	printf("-jpix      add a JP (IX)  at the end of the routine\n");
+	printf("-jpiy      add a JP (IY)  at the end of the routine\n");
+	printf("-jp <nn>   add a JP <label or value> at the end of the routine\n");
 	printf("\n");
 	
 	exit(-1);
@@ -1019,11 +926,7 @@ void GetSequence(struct s_parameter *parameter, char *sequence)
 				}
 		}
 //printf("vs=%d ve=%d\n",valstar,valend);
-		if (valend<valstar) {
-			for (j=valstar;j>=valend;j--) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
-		} else {
-			for (j=valstar;j<=valend;j++) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
-		}
+		for (j=valstar;j<=valend;j++) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
 	}
 
 //for (i=0;i<nidx;i++) printf("%d ",idx[i]);
@@ -1061,28 +964,34 @@ int ParseOptions(char **argv,int argc, struct s_parameter *parameter)
 		if (i+1<argc) {
 			GetSequence(parameter,argv[++i]);
 		} else Usage();
-	} else if (strcmp(argv[i],"-alist")==0) {
-		parameter->animate=1;
 	} else if (strcmp(argv[i],"-meta")==0) {
-		parameter->meta=1;
 		if (i+1<argc) {
-			i++;
-			parameter->metasize=atoi(argv[i]); // auto=0
+			parameter->meta=atoi(argv[++i]);
+			if (parameter->meta<2) {
+				fprintf(stderr,"************************************************\n");
+				fprintf(stderr,"usage is : -meta <size>           with size>1\n");
+				fprintf(stderr,"************************************************\n");
+				Usage();
+			}
 		} else {
-			fprintf(stderr,"; META option needs AUTO or a positive non null value\n");
-			exit(-1);
+			fprintf(stderr,"************************************************\n");
+			fprintf(stderr,"   -meta without parameter is deprecated!!!\n");
+			fprintf(stderr,"************************************************\n");
+			Usage();
 		}
-	} else if (strcmp(argv[i],"-noret")==0) {
-		parameter->noret=1;
-	} else if (strcmp(argv[i],"-jpix")==0) {
-		parameter->jpix=1;
-	} else if (strcmp(argv[i],"-jpiy")==0) {
-		parameter->jpiy=1;
 	} else if (strcmp(argv[i],"-jp")==0) {
 		parameter->jpmode=1;
 		if (i+1<argc) {
 			parameter->absolute=argv[++i];
 		} else Usage();
+	} else if (strcmp(argv[i],"-noret")==0) {
+		parameter->noret=1;
+	} else if (strcmp(argv[i],"-exhlde")==0) {
+		parameter->exhlde=1;
+	} else if (strcmp(argv[i],"-jpix")==0) {
+		parameter->jpix=1;
+	} else if (strcmp(argv[i],"-jpiy")==0) {
+		parameter->jpiy=1;
 	} else if (argv[i][0]=='-') {
 		switch(argv[i][1])
 		{
@@ -1134,6 +1043,8 @@ void GetParametersFromCommandLine(int argc, char **argv, struct s_parameter *par
 		fprintf(stderr,"; disabling RET at the end of the routine\n");
 		parameter->noret=1;
 	}
+
+	if (parameter->meta<2) parameter->meta=1;
 
 	if (parameter->compilefull && parameter->compilediff) {
 		printf("options -c and -d are exclusive\n");
