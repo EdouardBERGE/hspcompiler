@@ -1,0 +1,9 @@
+
+hspcompiler : compiler.c 
+	cc compiler.c -DOS_MACOS  -O2  -o hspcompiler  -O2 -arch x86_64 -arch arm64
+
+
+
+
+
+
