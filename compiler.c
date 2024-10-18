@@ -43,6 +43,8 @@ struct s_parameter {
 	char *filename1;
 	char *filename2;
 	char *label;
+	int label_unique_index;
+	int label_unique_index_start;
 	int compilefull;
 	int compilediff;
 	int inch;
@@ -155,6 +157,7 @@ struct s_compilation_action {
 	unsigned char *sp2;
 	int idx,idx2;
 	int wrklen;
+	int uidx;
 };
 
 struct s_compilation_thread {
@@ -219,8 +222,12 @@ void *MakeDiffThread(void *param)
 			ct->action[i].sp2[j]&=0xF;
 		}
 		if (ct->parameter->label) {
-			if (ct->action[i].idx==ct->action[i].idx2) diff_printf(&ct->output,&ct->lenoutput,"%s%d:\n",ct->parameter->label,ct->action[i].idx);
-				else diff_printf(&ct->output,&ct->lenoutput,"%s%d_%d:\n",ct->parameter->label,ct->action[i].idx,ct->action[i].idx2);
+			if (ct->parameter->label_unique_index) {
+				diff_printf(&ct->output,&ct->lenoutput,"%s%d:\n",ct->parameter->label,ct->action[i].uidx);
+			} else {
+				if (ct->action[i].idx==ct->action[i].idx2) diff_printf(&ct->output,&ct->lenoutput,"%s%d:\n",ct->parameter->label,ct->action[i].idx);
+					else diff_printf(&ct->output,&ct->lenoutput,"%s%d_%d:\n",ct->parameter->label,ct->action[i].idx,ct->action[i].idx2);
+			}
 		}
 		MakeDiff(&ct->output, &ct->lenoutput,ct->parameter,ct->action[i].sp1,ct->action[i].sp2,ct->action[i].wrklen);
 	}
@@ -689,6 +696,8 @@ void Compiler(struct s_parameter *parameter)
 	int lenoutput=0;
 	char *output=NULL;
 
+	compilation_action.uidx=parameter->label_unique_index_start;
+
 	if (0 && parameter->meta) {
 		int len;
 
@@ -738,6 +747,7 @@ void Compiler(struct s_parameter *parameter)
 					compilation_action.idx=compilation_action.idx2=parameter->idx1[j];
 					compilation_action.wrklen=256*parameter->meta;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
+					compilation_action.uidx++;
 				}
 			} else {
 				/* compile diff sur deux fichiers avec deux séquences! */
@@ -765,6 +775,7 @@ void Compiler(struct s_parameter *parameter)
 					compilation_action.idx2=parameter->idx2[j];
 					compilation_action.wrklen=256*parameter->meta;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
+					compilation_action.uidx++;
 				}
 			}
 		} else {
@@ -815,6 +826,7 @@ void Compiler(struct s_parameter *parameter)
 					compilation_action.wrklen=256;
 
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
+					compilation_action.uidx++;
 				} else if (parameter->compilefull) {
 					compilation_action.sp1=malloc(256);
 					compilation_action.sp2=malloc(256);
@@ -826,6 +838,7 @@ void Compiler(struct s_parameter *parameter)
 					}
 					compilation_action.wrklen=256;
 					ObjectArrayAddDynamicValueConcat((void**)&compilation_actions,&nbcaction,&maxcaction,&compilation_action,sizeof(compilation_action));
+					compilation_action.uidx++;
 				}
 			}
 		}
@@ -886,12 +899,15 @@ void Usage()
 	printf("\n");
 	printf("code generation:\n");
 	printf("-exhlde    add a EX HL,DE          at the beginning of the routine\n");
-	printf("-l <label> insert a numbered label at the beginning (for multi diff)\n");
 	printf("-inch      add a INC H    at the end of the routine\n");
 	printf("-noret     do not add RET at the end of the routine\n");
 	printf("-jpix      add a JP (IX)  at the end of the routine\n");
 	printf("-jpiy      add a JP (IY)  at the end of the routine\n");
 	printf("-jp <nn>   add a JP <label or value> at the end of the routine\n");
+	printf("label generation:\n");
+	printf("-l <label> insert a numbered label at the beginning (for multi diff)\n");
+	printf("-lidx use a unique counter at the end of the function label\n");
+	printf("-lstartidx <value> set the starting value for the counter (default:0)\n");
 	printf("\n");
 	
 	exit(-1);
@@ -926,7 +942,11 @@ void GetSequence(struct s_parameter *parameter, char *sequence)
 				}
 		}
 //printf("vs=%d ve=%d\n",valstar,valend);
-		for (j=valstar;j<=valend;j++) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
+		if (valstar<=valend) {
+			for (j=valstar;j<=valend;j++) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
+		} else {
+			for (j=valstar;j>=valend;j--) IntArrayAddDynamicValueConcat(&idx,&nidx,&midx,j);
+		}
 	}
 
 //for (i=0;i<nidx;i++) printf("%d ",idx[i]);
@@ -960,6 +980,12 @@ int ParseOptions(char **argv,int argc, struct s_parameter *parameter)
 
 	if (strcmp(argv[i],"-inch")==0) {
 		parameter->inch=1;
+	} else if (strcmp(argv[i],"-lidx")==0) {
+		parameter->label_unique_index=1;
+	} else if (strcmp(argv[i],"-lstartidx")==0) {
+		if (i+1<argc) {
+			parameter->label_unique_index_start=atoi(argv[++i]);
+		} else Usage();
 	} else if (strcmp(argv[i],"-idx")==0) {
 		if (i+1<argc) {
 			GetSequence(parameter,argv[++i]);
